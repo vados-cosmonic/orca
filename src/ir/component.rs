@@ -123,6 +123,32 @@ impl<'a> Component<'a> {
         }
     }
 
+    /// Add a component section
+    ///
+    /// This normally needs to be done after a manual change to a subsection
+    /// (such as `self.component_types`), which ensures that added objects
+    /// are output during encoding.
+    ///
+    /// This function returns the ID last created for the section,
+    /// i.e. the ID of the item that was last added:
+    ///
+    /// ```no_run
+    /// component.imports.push(ComponentImport { ... })
+    /// let import_id: u32 = component.add_section(ComponentSection::ComponentImport);
+    /// ```
+    pub fn add_section(&mut self, section: ComponentSection) -> u32 {
+        match self.sections.iter_mut().find(|(_count, s)| *s == section) {
+            Some((count, _section)) => {
+                *count += 1;
+                *count - 1
+            }
+            None => {
+                self.sections.push((1, section));
+                1
+            }
+        }
+    }
+
     /// Add a Module to this Component.
     pub fn add_module(&mut self, module: Module<'a>) {
         self.modules.push(module);
@@ -141,12 +167,24 @@ impl<'a> Component<'a> {
         num_sections: &mut usize,
         sections_added: u32,
     ) {
-        if *num_sections > 0 && sections[*num_sections - 1].1 == section {
-            sections[*num_sections - 1].0 += sections_added;
-        } else {
-            sections.push((sections_added, section));
-            *num_sections += 1;
+        match sections.iter_mut().find(|(_, s)| *s == section) {
+            // If a section already exists, add to it
+            Some((count, _section)) => {
+                *count += sections_added;
+            }
+            // If a section didn't exist before, add it and up the number of total sections
+            None => {
+                sections.push((sections_added, section));
+                *num_sections += 1;
+            }
         }
+
+        // if *num_sections > 0 && sections[*num_sections - 1].1 == section {
+        //     sections[*num_sections - 1].0 += sections_added;
+        // } else {
+        //     sections.push((sections_added, section));
+        //     *num_sections += 1;
+        // }
     }
 
     /// Parse a `Component` from a wasm binary.
@@ -546,6 +584,7 @@ impl<'a> Component<'a> {
                             <= self.component_types.len()
                     );
                     let mut component_ty_section = wasm_encoder::ComponentTypeSection::new();
+
                     for comp_ty_idx in last_processed_comp_ty..last_processed_comp_ty + num {
                         match &self.component_types[comp_ty_idx as usize] {
                             ComponentType::Defined(comp_ty) => {
@@ -651,6 +690,10 @@ impl<'a> Component<'a> {
                                 component_ty_section.component(&new_comp);
                             }
                             ComponentType::Instance(inst) => {
+                                // eprintln!(
+                                //     "\nWORKING ON INSTANCE: {:?}",
+                                //     self.component_types[comp_ty_idx as usize]
+                                // );
                                 component_ty_section
                                     .instance(&convert_instance_type(inst, &mut reencode));
                             }
