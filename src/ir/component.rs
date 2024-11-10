@@ -1,6 +1,9 @@
 #![allow(clippy::mut_range_bound)] // see https://github.com/rust-lang/rust-clippy/issues/6072
 //! Intermediate Representation of a wasm component.
 
+use std::collections::HashMap;
+use std::num::TryFromIntError;
+
 use crate::error::Error;
 use crate::ir::helpers::{
     print_alias, print_component_export, print_component_import, print_component_type,
@@ -58,6 +61,9 @@ pub struct Component<'a> {
     pub sections: Vec<(u32, ComponentSection)>,
     num_sections: usize,
 
+    /// Keeps track of latest IDs dispensed to component sections
+    latest_type_id: u32,
+
     // Names
     pub(crate) component_name: Option<String>,
     pub(crate) core_func_names: wasm_encoder::NameMap,
@@ -100,6 +106,7 @@ impl<'a> Component<'a> {
             num_sections: 0,
             components: vec![],
             component_name: None,
+            latest_type_id: 0,
             core_func_names: wasm_encoder::NameMap::new(),
             global_names: wasm_encoder::NameMap::new(),
             memory_names: wasm_encoder::NameMap::new(),
@@ -115,12 +122,28 @@ impl<'a> Component<'a> {
         }
     }
 
-    fn add_to_own_section(&mut self, section: ComponentSection) {
+    pub fn add_to_own_section(&mut self, section: ComponentSection) {
         if self.sections[self.num_sections - 1].1 == section {
             self.sections[self.num_sections - 1].0 += 1;
         } else {
-            self.sections.push((1, section));
+            self.sections.push((1, section.clone()));
         }
+
+        // Update the tally of Type IDs
+        if section == ComponentSection::ComponentType || section == ComponentSection::Alias {
+            self.latest_type_id += 1
+        }
+    }
+
+    /// Attempt to get the latest type ID
+    pub fn get_latest_type_id(&self) -> std::result::Result<u32, TryFromIntError> {
+        self.alias
+            .iter()
+            .filter(|v| matches!(v, ComponentAlias::InstanceExport { .. }))
+            .count()
+            .saturating_sub(self.component_types.len())
+            .saturating_add(1)
+            .try_into()
     }
 
     /// Add a component section
@@ -166,25 +189,19 @@ impl<'a> Component<'a> {
         section: ComponentSection,
         num_sections: &mut usize,
         sections_added: u32,
+        latest_type_id: &mut u32,
     ) {
-        match sections.iter_mut().find(|(_, s)| *s == section) {
-            // If a section already exists, add to it
-            Some((count, _section)) => {
-                *count += sections_added;
-            }
-            // If a section didn't exist before, add it and up the number of total sections
-            None => {
-                sections.push((sections_added, section));
-                *num_sections += 1;
-            }
+        if *num_sections > 0 && sections[*num_sections - 1].1 == section {
+            sections[*num_sections - 1].0 += sections_added;
+        } else {
+            sections.push((sections_added, section.clone()));
+            *num_sections += 1;
         }
 
-        // if *num_sections > 0 && sections[*num_sections - 1].1 == section {
-        //     sections[*num_sections - 1].0 += sections_added;
-        // } else {
-        //     sections.push((sections_added, section));
-        //     *num_sections += 1;
-        // }
+        // Update the tally of Type IDs
+        if section == ComponentSection::ComponentType || section == ComponentSection::Alias {
+            *latest_type_id += 1;
+        }
     }
 
     /// Parse a `Component` from a wasm binary.
@@ -225,6 +242,7 @@ impl<'a> Component<'a> {
         let mut components: Vec<Component> = vec![];
         let mut start_section = vec![];
         let mut stack = vec![];
+        let mut latest_type_id = 0;
 
         // Names
         let mut component_name: Option<String> = None;
@@ -263,6 +281,7 @@ impl<'a> Component<'a> {
                         ComponentSection::ComponentImport,
                         &mut num_sections,
                         l as u32,
+                        &mut latest_type_id,
                     );
                 }
                 Payload::ComponentExportSection(export_section_reader) => {
@@ -276,6 +295,7 @@ impl<'a> Component<'a> {
                         ComponentSection::ComponentExport,
                         &mut num_sections,
                         l as u32,
+                        &mut latest_type_id,
                     );
                 }
                 Payload::InstanceSection(instance_section_reader) => {
@@ -289,6 +309,7 @@ impl<'a> Component<'a> {
                         ComponentSection::CoreInstance,
                         &mut num_sections,
                         l as u32,
+                        &mut latest_type_id,
                     );
                 }
                 Payload::CoreTypeSection(core_type_reader) => {
@@ -301,6 +322,7 @@ impl<'a> Component<'a> {
                         ComponentSection::CoreType,
                         &mut num_sections,
                         l as u32,
+                        &mut latest_type_id,
                     );
                 }
                 Payload::ComponentTypeSection(component_type_reader) => {
@@ -314,6 +336,7 @@ impl<'a> Component<'a> {
                         ComponentSection::ComponentType,
                         &mut num_sections,
                         l as u32,
+                        &mut latest_type_id,
                     );
                 }
                 Payload::ComponentInstanceSection(component_instances) => {
@@ -326,6 +349,7 @@ impl<'a> Component<'a> {
                         ComponentSection::ComponentInstance,
                         &mut num_sections,
                         l as u32,
+                        &mut latest_type_id,
                     );
                 }
                 Payload::ComponentAliasSection(alias_reader) => {
@@ -338,6 +362,7 @@ impl<'a> Component<'a> {
                         ComponentSection::Alias,
                         &mut num_sections,
                         l as u32,
+                        &mut latest_type_id,
                     );
                 }
                 Payload::ComponentCanonicalSection(canon_reader) => {
@@ -350,6 +375,7 @@ impl<'a> Component<'a> {
                         ComponentSection::Canon,
                         &mut num_sections,
                         l as u32,
+                        &mut latest_type_id,
                     );
                 }
                 Payload::ModuleSection {
@@ -369,6 +395,7 @@ impl<'a> Component<'a> {
                         ComponentSection::Module,
                         &mut num_sections,
                         1,
+                        &mut latest_type_id,
                     );
                 }
                 Payload::ComponentSection {
@@ -391,6 +418,7 @@ impl<'a> Component<'a> {
                         ComponentSection::Component,
                         &mut num_sections,
                         1,
+                        &mut latest_type_id,
                     );
                 }
                 Payload::ComponentStartSection { start, range: _ } => {
@@ -400,6 +428,7 @@ impl<'a> Component<'a> {
                         ComponentSection::ComponentStartSection,
                         &mut num_sections,
                         1,
+                        &mut latest_type_id,
                     );
                 }
                 Payload::CustomSection(custom_section_reader) => {
@@ -459,6 +488,7 @@ impl<'a> Component<'a> {
                                 ComponentSection::CustomSection,
                                 &mut num_sections,
                                 1,
+                                &mut latest_type_id,
                             );
                         }
                     }
@@ -483,6 +513,7 @@ impl<'a> Component<'a> {
             component_instance,
             canons,
             custom_sections: CustomSections::new(custom_sections),
+            latest_type_id,
             num_modules,
             sections,
             start_section,
